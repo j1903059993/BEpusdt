@@ -28,8 +28,19 @@ type EpNotify struct {
 	ActualAmount       string  `json:"actual_amount"`        //  USDT 交易数额
 	Token              string  `json:"token"`                //  收款钱包地址
 	BlockTransactionId string  `json:"block_transaction_id"` // 区块id
-	Signature          string  `json:"signature"`            // 签名
-	Status             int     `json:"status"`               //  1：等待支付，2：支付成功，3：订单超时
+	Network            string  `json:"network,omitempty"`
+	EventIndex         string  `json:"event_index,omitempty"`
+	TokenContract      string  `json:"token_contract,omitempty"`
+	Signature          string  `json:"signature"` // 签名
+	Status             int     `json:"status"`    //  1：等待支付，2：支付成功，3：订单超时
+}
+
+func (body *EpNotify) transferProof(order model.Order) {
+	if order.RefEventIndex != "" {
+		body.Network = model.TradeNetwork(order.TradeType)
+		body.EventIndex = order.RefEventIndex
+		body.TokenContract = model.GetTradeContract(order.TradeType)
+	}
 }
 
 func Handle(order model.Order) error {
@@ -113,6 +124,7 @@ func epusdt(ctx context.Context, order model.Order) error {
 		BlockTransactionId: order.RefHash,
 		Status:             order.Status,
 	}
+	body.transferProof(order)
 	var jsonBody, err = json.Marshal(body)
 	if err != nil {
 		return err
@@ -152,12 +164,22 @@ func epusdt(ctx context.Context, order model.Order) error {
 		return fmt.Errorf("商户系统返回状态码错误：%d（必须是200）", resp.StatusCode)
 	}
 
+	ack, ackErr := io.ReadAll(io.LimitReader(resp.Body, 1025))
+	if ackErr != nil || !acceptedAck(ack) {
+		markNotifyFail(order, "商户未确认回调，保留重试")
+		return errors.New("merchant did not acknowledge payment callback")
+	}
 	if err = order.SetNotifyState(model.OrderNotifyStateSucc); err != nil {
 
 		return err
 	}
 
 	return nil
+}
+
+func acceptedAck(body []byte) bool {
+	value := strings.ToLower(strings.TrimSpace(string(body)))
+	return value == "success" || value == "ok"
 }
 
 func Bepusdt(o model.Order) {
@@ -206,6 +228,7 @@ func deliverBepusdtStatusUpdate(db *gorm.DB, client *http.Client, authToken stri
 		BlockTransactionId: current.RefHash,
 		Status:             current.Status,
 	}
+	body.transferProof(current)
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -224,7 +247,7 @@ func deliverBepusdtStatusUpdate(db *gorm.DB, client *http.Client, authToken stri
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Powered-By", "https://github.com/v03413/BEpusdt")
+	req.Header.Set("Powered-By", "https://github.com/j1903059993/BEpusdt")
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -236,6 +259,9 @@ func deliverBepusdtStatusUpdate(db *gorm.DB, client *http.Client, authToken stri
 	}
 
 	all, _ := io.ReadAll(resp.Body)
+	if !acceptedAck(all) {
+		return errors.New("merchant did not acknowledge status callback")
+	}
 	log.Info(fmt.Sprintf("订单回调成功[%d]：%s %s", current.Status, current.TradeId, string(all)))
 
 	return nil

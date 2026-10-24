@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -306,6 +307,7 @@ func (e *evm) parseNativeTransfer(array []gjson.Result, num int, timestamp time.
 			RecvAddress: toAddress,
 			Amount:      decimal.NewFromBigInt(amount, e.Native.Decimal),
 			TxHash:      tx.Get("hash").String(),
+			EventIndex:  "contract:0",
 			BlockNum:    num,
 			Timestamp:   timestamp,
 			TradeType:   e.Native.TradeType,
@@ -339,15 +341,17 @@ func (e *evm) parseEventTransfer(b evmBlock, timestamp map[string]time.Time) ([]
 	}
 
 	for _, itm := range data.Get("result").Array() {
+		if itm.Get("removed").Bool() {
+			continue
+		}
 		to := itm.Get("address").String()
 		tradeType, ok := model.GetContractTrade(to)
-		if !ok {
-
+		if !ok || model.TradeNetwork(tradeType) != e.Network {
 			continue
 		}
 
 		topics := itm.Get("topics").Array()
-		if len(topics) < 3 {
+		if len(topics) != 3 || len(topics[1].String()) != 66 || len(topics[2].String()) != 66 {
 
 			continue
 		}
@@ -359,7 +363,20 @@ func (e *evm) parseEventTransfer(b evmBlock, timestamp map[string]time.Time) ([]
 
 		from := fmt.Sprintf("0x%s", topics[1].String()[26:])
 		recv := fmt.Sprintf("0x%s", topics[2].String()[26:])
-		amount, ok := big.NewInt(0).SetString(itm.Get("data").String()[2:], 16)
+		value := itm.Get("data").String()
+		index := itm.Get("logIndex")
+		if !index.Exists() || !strings.HasPrefix(index.String(), "0x") || len(value) != 66 || !strings.HasPrefix(value, "0x") {
+			continue
+		}
+		event, err := strconv.ParseUint(strings.TrimPrefix(index.String(), "0x"), 16, 64)
+		if err != nil {
+			continue
+		}
+		blockTime, known := timestamp[itm.Get("blockNumber").String()]
+		if !known || blockTime.IsZero() {
+			continue
+		}
+		amount, ok := big.NewInt(0).SetString(value[2:], 16)
 		if !ok || amount.Sign() <= 0 {
 
 			continue
@@ -371,8 +388,9 @@ func (e *evm) parseEventTransfer(b evmBlock, timestamp map[string]time.Time) ([]
 			RecvAddress: recv,
 			Amount:      decimal.NewFromBigInt(amount, model.GetContractDecimal(to)),
 			TxHash:      itm.Get("transactionHash").String(),
+			EventIndex:  "log:" + strconv.FormatUint(event, 10),
 			BlockNum:    cast.ToInt(itm.Get("blockNumber").String()),
-			Timestamp:   timestamp[itm.Get("blockNumber").String()],
+			Timestamp:   blockTime,
 			TradeType:   tradeType,
 		})
 	}
@@ -427,7 +445,7 @@ func (e *evm) tradeConfirmHandle(ctx context.Context) {
 			return
 		}
 
-		if data.Get("result.status").String() == "0x1" {
+		if evmReceiptConfirms(o, data.Get("result")) {
 			markFinalConfirmed(o)
 		}
 	}

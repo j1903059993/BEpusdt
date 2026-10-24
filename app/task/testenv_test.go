@@ -25,11 +25,11 @@ func initTaskTestEnv(t *testing.T, kv map[model.ConfKey]string) {
 	if err := model.Init(filepath.Join(t.TempDir(), "task-test.db"), ""); err != nil {
 		t.Fatalf("init db: %v", err)
 	}
-	t.Cleanup(func() {
-		if db, err := model.Db.DB(); err == nil {
-			_ = db.Close()
-		}
-	})
+	db, err := model.Db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
 
 	for k, v := range kv {
 		model.Db.Model(&model.Conf{}).Where("k = ?", k).Update("v", v)

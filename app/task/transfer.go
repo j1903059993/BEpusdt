@@ -20,6 +20,7 @@ import (
 type transfer struct {
 	Network     string          `json:"network"`
 	TxHash      string          `json:"tx_hash"`
+	EventIndex  string          `json:"event_index"`
 	Amount      decimal.Decimal `json:"amount"`
 	FromAddress string          `json:"from_address"`
 	RecvAddress string          `json:"recv_address"`
@@ -109,7 +110,7 @@ func orderTransferHandle(ctx context.Context) {
 					}
 
 					// 订单匹配 进入确认流程
-					if err := o.MarkConfirming(t.BlockNum, t.FromAddress, t.TxHash, t.Timestamp, t.Amount); err != nil {
+					if err := claimOrderTransfer(&o, t); err != nil {
 						log.Task.Warn("mark order confirming failed:", err)
 						continue
 					}
@@ -145,11 +146,21 @@ func orderTransferMatch(o model.Order, t transfer) bool {
 	if !o.AddressLocked && !amountMatch(t.Amount, o.Amount, string(o.TradeType)) {
 		return false
 	}
-	if !o.CreatedAt.Before(t.Timestamp) || !o.ExpiredAt.After(t.Timestamp) {
+	if o.CreatedAt == nil || !o.CreatedAt.Before(t.Timestamp) || !o.ExpiredAt.After(t.Timestamp) {
 		return false
 	}
 
 	return true
+}
+
+func claimOrderTransfer(o *model.Order, t transfer) error {
+	if t.Network == conf.Bsc || t.Network == conf.Polygon || t.Network == conf.Tron {
+		if t.EventIndex == "" {
+			return model.ErrTransferInvalid
+		}
+		return o.ClaimConfirming(t.Network, t.TxHash, t.EventIndex, t.BlockNum, t.FromAddress, t.RecvAddress, t.Timestamp, t.Amount)
+	}
+	return o.MarkConfirming(t.BlockNum, t.FromAddress, t.TxHash, t.Timestamp, t.Amount)
 }
 
 func orderMatchAddress(o model.Order) string {

@@ -10,6 +10,7 @@ import (
 type TronTransfer struct {
 	Network     string
 	TxHash      string
+	EventIndex  string
 	Amount      decimal.Decimal
 	FromAddress string
 	RecvAddress string

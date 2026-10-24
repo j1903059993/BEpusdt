@@ -85,6 +85,7 @@ type Order struct {
 	NotifyState       int        `gorm:"column:notify_state;not null;default:0;index:idx_order_notify_retry,priority:2;comment:回调状态 1：成功 0：失败" json:"notify_state"`
 	RefHash           string     `gorm:"column:ref_hash;type:varchar(128);not null;default:'';index;comment:交易哈希" json:"ref_hash"`
 	RefBlockNum       int        `gorm:"column:ref_block_num;not null;default:0;comment:区块索引" json:"ref_block_num"`
+	RefEventIndex     string     `gorm:"column:ref_event_index;size:64;not null;default:''" json:"ref_event_index"`
 	ExpiredAt         time.Time  `gorm:"column:expired_at;not null;comment:失效时间" json:"expired_at"`
 	ConfirmedAt       *time.Time `gorm:"column:confirmed_at;not null;comment:交易确认时间" json:"confirmed_at"`
 	ClientFingerprint string     `gorm:"column:client_fingerprint;type:varchar(64);not null;default:'';comment:'客户端指纹'" json:"-"`
@@ -150,6 +151,13 @@ func (o *Order) SetFailed() {
 }
 
 func (o *Order) MarkConfirming(blockNum int, from, hash string, at time.Time, amount decimal.Decimal) error {
+	if network := TradeNetwork(o.TradeType); network == "bsc" || network == "polygon" || network == "tron" {
+		receiver := o.MatchAddress
+		if receiver == "" {
+			receiver = o.Address
+		}
+		return o.ClaimConfirming(network, hash, "*", blockNum, from, receiver, at, amount)
+	}
 	o.FromAddress = from
 	o.ConfirmedAt = &at
 	o.RefHash = hash

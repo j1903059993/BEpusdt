@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"strconv"
 	"sync"
 	"time"
 
@@ -184,6 +185,20 @@ func (t *tron) blockParse(n any) {
 		return
 	}
 
+	receiptCtx, receiptCancel := context.WithTimeout(context.Background(), time.Second*10)
+	receipts, receiptErr := api.NewWalletClient(conn).GetTransactionInfoByBlockNum(receiptCtx, &api.NumberMessage{Num: int64(num)})
+	receiptCancel()
+	if receiptErr != nil || receipts == nil {
+		conf.RecordFailure(conf.Tron)
+		t.scheduleBlockRetry(num, 0)
+		log.Task.Warn("TRON block receipts unavailable")
+		return
+	}
+	receiptByID := make(map[string]*core.TransactionInfo)
+	for _, receipt := range receipts.TransactionInfo {
+		receiptByID[hex.EncodeToString(receipt.Id)] = receipt
+	}
+
 	conf.RecordSuccess(conf.Tron, cast.ToString(num))
 	t.resetBlockRetry(num)
 
@@ -198,7 +213,25 @@ func (t *tron) blockParse(n any) {
 
 		var itm = trans.GetTransaction()
 		var id = hex.EncodeToString(trans.Txid)
+
+		smart := false
 		for _, contract := range itm.GetRawData().GetContract() {
+			if contract.GetType() == core.Transaction_Contract_TriggerSmartContract {
+				smart = true
+			}
+		}
+		if smart {
+			events, err := t.receiptTransfers(receiptByID[id], id, num, timestamp)
+			if err != nil {
+				conf.RecordFailure(conf.Tron)
+				t.scheduleBlockRetry(num, 0)
+				log.Task.Warn("TRON receipt validation failed")
+				return
+			}
+			transfers = append(transfers, events...)
+		}
+
+		for contractIndex, contract := range itm.GetRawData().GetContract() {
 			// 资源代理 DelegateResourceContract
 			if contract.GetType() == core.Transaction_Contract_DelegateResourceContract {
 				var foo = &core.DelegateResourceContract{}
@@ -251,6 +284,7 @@ func (t *tron) blockParse(n any) {
 				transfers = append(transfers, transfer{
 					Network:     conf.Tron,
 					TxHash:      id,
+					EventIndex:  "contract:" + strconv.Itoa(contractIndex),
 					Amount:      decimal.NewFromBigInt(new(big.Int).SetInt64(foo.Amount), -6),
 					FromAddress: t.base58CheckEncode(foo.OwnerAddress),
 					RecvAddress: t.base58CheckEncode(foo.ToAddress),
@@ -260,78 +294,6 @@ func (t *tron) blockParse(n any) {
 				})
 			}
 
-			// 触发智能合约
-			if contract.GetType() == core.Transaction_Contract_TriggerSmartContract {
-				var foo = &core.TriggerSmartContract{}
-				if err := contract.GetParameter().UnmarshalTo(foo); err != nil {
-
-					continue
-				}
-
-				data := foo.GetData()
-				if len(data) < 4 {
-
-					continue
-				}
-
-				// Gas Free 钱包 合约授权转账
-				if bytes.Equal(foo.OwnerAddress, gasFreeOwnerAddress) && bytes.Equal(foo.ContractAddress, gasFreeContractAddress) {
-					from, receiver, amount := t.gasFreePermitTransfer(data)
-					if amount != nil {
-						transfers = append(transfers, transfer{
-							Network:     conf.Tron,
-							TxHash:      id,
-							Amount:      decimal.NewFromBigInt(amount, conf.UsdtTronDecimals),
-							FromAddress: from,
-							RecvAddress: receiver,
-							Timestamp:   timestamp,
-							TradeType:   model.UsdtTrc20,
-							BlockNum:    cast.ToInt(num),
-						})
-					}
-				}
-
-				// trc20 合约解析
-				var tradeType model.TradeType = "None"
-				if bytes.Equal(foo.GetContractAddress(), usdtTrc20ContractAddress) {
-					tradeType = model.UsdtTrc20
-				} else if bytes.Equal(foo.GetContractAddress(), usdcTrc20ContractAddress) {
-					tradeType = model.UsdcTrc20
-				} else {
-					continue
-				}
-
-				if bytes.Equal(data[:4], []byte{0xa9, 0x05, 0x9c, 0xbb}) { //  a9059cbb transfer
-					receiver, amount := t.parseTrc20ContractTransfer(data)
-					if amount != nil {
-						transfers = append(transfers, transfer{
-							Network:     conf.Tron,
-							TxHash:      id,
-							Amount:      decimal.NewFromBigInt(amount, model.GetTradeDecimal(tradeType)),
-							FromAddress: t.base58CheckEncode(foo.OwnerAddress),
-							RecvAddress: receiver,
-							Timestamp:   timestamp,
-							TradeType:   tradeType,
-							BlockNum:    cast.ToInt(num),
-						})
-					}
-				}
-				if bytes.Equal(data[:4], []byte{0x23, 0xb8, 0x72, 0xdd}) { //  transferFrom (23b872dd)
-					from, to, amount := t.parseTrc20ContractTransferFrom(data)
-					if amount != nil {
-						transfers = append(transfers, transfer{
-							Network:     conf.Tron,
-							TxHash:      id,
-							Amount:      decimal.NewFromBigInt(amount, model.GetTradeDecimal(tradeType)),
-							FromAddress: from,
-							RecvAddress: to,
-							Timestamp:   timestamp,
-							TradeType:   tradeType,
-							BlockNum:    cast.ToInt(num),
-						})
-					}
-				}
-			}
 		}
 	}
 
@@ -447,6 +409,25 @@ func (t *tron) tradeConfirmHandle(ctx context.Context) {
 		}
 
 		if info.GetReceipt().GetResult() == core.Transaction_Result_SUCCESS {
+			if o.RefEventIndex != "" {
+				if o.ConfirmedAt == nil {
+					return
+				}
+				events, err := t.receiptTransfers(info, o.RefHash, o.RefBlockNum, *o.ConfirmedAt)
+				if err != nil {
+					return
+				}
+				matched := false
+				for _, event := range events {
+					if event.EventIndex == o.RefEventIndex && event.FromAddress == o.FromAddress && orderTransferMatch(o, event) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					return
+				}
+			}
 			markFinalConfirmed(o)
 		}
 	}

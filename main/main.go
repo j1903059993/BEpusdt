@@ -32,6 +32,7 @@ func main() {
 		Commands: []*cli.Command{
 			cmd.Start,
 			cmd.Version,
+			cmd.AuditDB,
 			cmd.Reset,
 		},
 	}

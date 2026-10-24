@@ -208,6 +208,15 @@ func (Order) Paid(ctx *gin.Context) {
 	}
 
 	confirmedAt := time.Now()
+	if network := model.TradeNetwork(order.TradeType); network == "bsc" || network == "tron" || network == "polygon" {
+		if err := order.ConfirmManualTransfer(req.RefHash); err != nil {
+			base.BadRequest(ctx, "该链上交易不可用于此订单，请核对交易归属与已有认领")
+			return
+		}
+		go notify.Handle(order)
+		base.Ok(ctx, "操作成功")
+		return
+	}
 	var update = map[string]interface{}{
 		"ref_hash":     req.RefHash,
 		"status":       model.OrderStatusSuccess,

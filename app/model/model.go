@@ -120,13 +120,18 @@ func initPostgres(dsn string) error {
 }
 
 func AutoMigrate() error {
-	return migration.Run(Db, []any{
+	if err := migration.Run(Db, []any{
 		&Wallet{},
 		&Order{},
 		&NotifyRecord{},
 		&Conf{},
 		&Rate{},
-	})
+		&TransferLock{},
+		&TransferClaim{},
+	}); err != nil {
+		return err
+	}
+	return reserveLegacyTransfers(Db)
 }
 
 func Close() {
